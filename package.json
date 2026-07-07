@@ -1,0 +1,52 @@
+{
+  "name": "object-stream-community",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:host": "prisma generate && node scripts/generate-ddl.mjs && next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run",
+    "check:data-preservation": "tsx scripts/check-data-preservation.ts",
+    "db:reset": "prisma migrate reset --force",
+    "pack:wasmer": "bash scripts/make-wasmer-drop.sh"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "@tiptap/extension-link": "^3.27.1",
+    "@tiptap/extension-table": "^3.27.1",
+    "@tiptap/extension-table-cell": "^3.27.1",
+    "@tiptap/extension-table-header": "^3.27.1",
+    "@tiptap/extension-table-row": "^3.27.1",
+    "@tiptap/react": "^3.27.1",
+    "@tiptap/starter-kit": "^3.27.1",
+    "bcryptjs": "^3.0.3",
+    "lucide-react": "^1.23.0",
+    "next": "16.2.10",
+    "next-auth": "^5.0.0-beta.31",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "prisma": "^6.19.3",
+    "tailwindcss": "^4",
+    "tsx": "^4.22.4",
+    "typescript": "^5",
+    "vitest": "^4.1.9"
+  }
+}

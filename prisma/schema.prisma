@@ -1,0 +1,437 @@
+// Object Stream Community schema (Postgres in production, SQLite-compatible).
+// Kept portable: no enums (String + zod constants in lib/constants.ts),
+// no scalar lists (genreTags is a lowercase comma-separated string).
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique // lowercase ^[a-z0-9_]{3,20}$
+  email        String?  @unique
+  passwordHash String
+  // Set on accounts restored from a backup (original hash unrecoverable):
+  // sign-in offers a one-time self-service password reset instead.
+  mustResetPassword Boolean @default(false)
+  avatarUrl    String?
+  bio          String?
+  isAdmin      Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  videos            Video[]            @relation("SubmittedVideos")
+  playlists         Playlist[]
+  playlistImports   PlaylistImport[]
+  watchStatuses     WatchStatus[]
+  ratings           Rating[]
+  reviews           Review[]
+  reports           Report[]
+  favoriteShows     FavoriteShow[]
+  playlistFollows   PlaylistFollow[]
+  wikiPageWatches   WikiPageWatch[]
+  showsAdded        Show[]             @relation("ShowsAdded")
+  videoRevisions    VideoRevision[]
+  playlistRevisions PlaylistRevision[]
+  wikiPagesCreated  WikiPage[]         @relation("WikiPagesCreated")
+  wikiPagesEdited   WikiPage[]         @relation("WikiPagesEdited")
+  wikiRevisions     WikiRevision[]
+  wikiDiscussions   WikiDiscussion[]
+}
+
+model Show {
+  id                  String   @id @default(cuid())
+  title               String
+  slug                String   @unique
+  description         String?
+  status              String   @default("Ongoing")
+  genreTags           String   @default("")
+  language            String   @default("English")
+  releaseYear         Int?
+  ageRangeTag         String   @default("Unknown")
+  coverImageUrl       String?
+  bannerImageUrl      String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  addedByUserId       String?
+  addedBy             User?    @relation("ShowsAdded", fields: [addedByUserId], references: [id], onDelete: SetNull)
+  isUpcoming          Boolean  @default(false)
+  expectedReleaseDate DateTime?
+  isHidden            Boolean  @default(false)
+  viewCount           Int      @default(0)
+  totalMarkedWatchedCount Int  @default(0)
+  estimatedSecondsWatched Int  @default(0)
+  followerCount       Int      @default(0)
+  reviewCount         Int      @default(0)
+  averageRating       Float    @default(0)
+
+  videos    Video[]
+  wikiPages WikiPage[]
+
+  @@index([slug])
+  @@index([status])
+  @@index([ageRangeTag])
+  @@index([isUpcoming])
+  @@index([isHidden])
+}
+
+model Video {
+  id              String   @id @default(cuid())
+  provider        String // "youtube" | "vimeo"
+  providerVideoId String
+  originalUrl     String
+  showId          String?
+  show            Show?    @relation(fields: [showId], references: [id], onDelete: SetNull)
+  showTitle       String
+  showSlug        String // slugify(showTitle)
+  episodeTitle    String?
+  seasonNumber    Int?
+  episodeNumber   Int?
+  description     String?
+  ageRangeTag     String   @default("Unknown")
+  genreTags       String   @default("") // "comedy,adventure"
+  language        String   @default("English")
+  releaseYear     Int?
+  status          String   @default("Ongoing") // SHOW_STATUSES
+  thumbnailUrl    String?
+  channelTitle    String?
+  publishedAt     DateTime?
+  youtubePlaylistId String?
+  playlistPosition Int?
+  runtimeSeconds   Int?
+  viewCount       Int      @default(0)
+  markedWatchedCount Int    @default(0)
+  estimatedSecondsWatched Int @default(0)
+  playlistAddCount Int      @default(0)
+  reviewCount     Int      @default(0)
+  averageRating   Float    @default(0)
+  isFeatured      Boolean  @default(false)
+  isHidden        Boolean  @default(false)
+  reportCount     Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  submittedByUserId String?
+  submittedBy       User?   @relation("SubmittedVideos", fields: [submittedByUserId], references: [id], onDelete: SetNull)
+
+  playlistItems PlaylistItem[]
+  watchStatuses WatchStatus[]
+  ratings       Rating[]
+  reviews       Review[]
+  revisions     VideoRevision[]
+  wikiPages     WikiPage[]
+
+  @@unique([provider, providerVideoId])
+  @@index([showId])
+  @@index([showSlug])
+  @@index([createdAt])
+  @@index([isFeatured])
+  @@index([viewCount])
+  @@index([markedWatchedCount])
+  @@index([averageRating])
+  @@index([status])
+  @@index([ageRangeTag])
+  @@index([language])
+  @@index([releaseYear])
+  @@index([youtubePlaylistId])
+}
+
+model Playlist {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  isPublic    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  viewCount   Int      @default(0)
+  followerCount Int    @default(0)
+  totalRuntimeSeconds Int @default(0)
+  markedWatchedCount Int @default(0)
+
+  items     PlaylistItem[]
+  revisions PlaylistRevision[]
+  follows   PlaylistFollow[]
+
+  @@index([userId])
+  @@index([isPublic, updatedAt])
+}
+
+model PlaylistImport {
+  id                    String   @id @default(cuid())
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  youtubePlaylistId     String
+  playlistTitle         String
+  playlistDescription   String?
+  channelTitle          String?
+  videoCount            Int
+  importedCount         Int
+  skippedDuplicateCount Int
+  status                String
+  createdAt             DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([youtubePlaylistId])
+  @@index([status])
+}
+
+// Wiki-style community editing: any signed-in user can edit video metadata
+// and public playlists. Every change lands here first, so any state can be
+// restored if something gets griefed.
+
+model VideoRevision {
+  id            String   @id @default(cuid())
+  videoId       String
+  video         Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  editorUserId  String?
+  editor        User?    @relation(fields: [editorUserId], references: [id], onDelete: SetNull)
+  note          String? // e.g. "restored version from Jul 1"
+  showTitle     String
+  episodeTitle  String?
+  seasonNumber  Int?
+  episodeNumber Int?
+  description   String?
+  ageRangeTag   String   @default("Unknown")
+  genreTags     String
+  language      String
+  releaseYear   Int?
+  status        String
+  thumbnailUrl  String?
+  channelTitle  String?
+  publishedAt   DateTime?
+  youtubePlaylistId String?
+  playlistPosition Int?
+  runtimeSeconds Int?
+  createdAt     DateTime @default(now())
+
+  @@index([videoId, createdAt])
+}
+
+model PlaylistRevision {
+  id           String   @id @default(cuid())
+  playlistId   String
+  playlist     Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  editorUserId String?
+  editor       User?    @relation(fields: [editorUserId], references: [id], onDelete: SetNull)
+  note         String?
+  name         String
+  description  String?
+  itemsJson    String // JSON array of videoIds in playlist order
+  createdAt    DateTime @default(now())
+
+  @@index([playlistId, createdAt])
+}
+
+model PlaylistItem {
+  id         String   @id @default(cuid())
+  playlistId String
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  videoId    String
+  video      Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  // 1-based. Deliberately NOT unique(playlistId, position): SQLite has no
+  // deferred constraints, so a unique index would break position swaps.
+  position   Int
+  addedAt    DateTime @default(now())
+
+  @@unique([playlistId, videoId])
+  @@index([playlistId, position])
+}
+
+model WatchStatus {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  status    String // WATCH_STATUSES
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, videoId])
+  @@index([userId, status])
+  @@index([videoId])
+}
+
+model Rating {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId   String
+  video     Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  rating    Int // 1..5 zod-enforced
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, videoId])
+  @@index([videoId])
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  videoId     String
+  video       Video    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  rating      Int? // shown on the review; when set, also upserted into Rating
+  text        String
+  isHidden    Boolean  @default(false)
+  reportCount Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // One review per user per video keeps upsert semantics and blocks review spam.
+  @@unique([userId, videoId])
+  @@index([videoId, createdAt])
+  @@index([userId])
+}
+
+model Report {
+  id         String   @id @default(cuid())
+  reporterId String
+  reporter   User     @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  // Polymorphic — no FK. Admin delete actions clean up orphan reports.
+  targetType String // "video" | "review"
+  targetId   String
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@unique([reporterId, targetType, targetId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+model FavoriteShow {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  showSlug  String
+  showTitle String // denormalized for display
+  createdAt DateTime @default(now())
+
+  @@unique([userId, showSlug])
+  @@index([showSlug])
+}
+
+model PlaylistFollow {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  playlistId String
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, playlistId])
+  @@index([playlistId])
+}
+
+model WikiPage {
+  id                 String   @id @default(cuid())
+  title              String
+  slug               String   @unique
+  pageType           String   @default("Other")
+  relatedShowId      String?
+  relatedShow        Show?    @relation(fields: [relatedShowId], references: [id], onDelete: SetNull)
+  relatedVideoId     String?
+  relatedVideo       Video?   @relation(fields: [relatedVideoId], references: [id], onDelete: SetNull)
+  contentWikitext    String   @default("")
+  renderedHtml       String   @default("")
+  summary            String?
+  mainImageUrl       String?
+  infoboxDataJson    String?
+  categories         String   @default("")
+  createdByUserId    String?
+  createdBy          User?    @relation("WikiPagesCreated", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  lastEditedByUserId String?
+  lastEditedBy       User?    @relation("WikiPagesEdited", fields: [lastEditedByUserId], references: [id], onDelete: SetNull)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  isProtected        Boolean  @default(false)
+  isHidden           Boolean  @default(false)
+  viewCount          Int      @default(0)
+  editCount          Int      @default(0)
+  revisionCount      Int      @default(0)
+  watcherCount       Int      @default(0)
+  lastEditedAt       DateTime?
+
+  revisions     WikiRevision[]
+  discussions   WikiDiscussion[]
+  categoryLinks WikiPageCategory[]
+  watches       WikiPageWatch[]
+
+  @@index([pageType])
+  @@index([relatedShowId])
+  @@index([relatedVideoId])
+  @@index([isHidden])
+  @@index([viewCount])
+  @@index([updatedAt])
+}
+
+model WikiRevision {
+  id              String   @id @default(cuid())
+  wikiPageId      String
+  wikiPage        WikiPage @relation(fields: [wikiPageId], references: [id], onDelete: Cascade)
+  editorUserId    String?
+  editor          User?    @relation(fields: [editorUserId], references: [id], onDelete: SetNull)
+  contentWikitext String
+  renderedHtml    String
+  editSummary     String?
+  createdAt       DateTime @default(now())
+
+  @@index([wikiPageId, createdAt])
+  @@index([editorUserId])
+}
+
+model WikiDiscussion {
+  id         String   @id @default(cuid())
+  wikiPageId String
+  wikiPage   WikiPage @relation(fields: [wikiPageId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  text       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  isHidden   Boolean  @default(false)
+
+  @@index([wikiPageId, createdAt])
+  @@index([userId])
+  @@index([isHidden])
+}
+
+model WikiCategory {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+
+  pages WikiPageCategory[]
+
+  @@index([slug])
+}
+
+model WikiPageCategory {
+  id         String       @id @default(cuid())
+  wikiPageId String
+  wikiPage   WikiPage     @relation(fields: [wikiPageId], references: [id], onDelete: Cascade)
+  categoryId String
+  category   WikiCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([wikiPageId, categoryId])
+  @@index([categoryId])
+}
+
+model WikiPageWatch {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wikiPageId String
+  wikiPage   WikiPage @relation(fields: [wikiPageId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, wikiPageId])
+  @@index([wikiPageId])
+}
