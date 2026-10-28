@@ -1,5 +1,11 @@
 # Universal fallback: runs the exact same app on any Docker/Node host.
-FROM node:22-alpine
+# Minimum patched Node 22 release from Render's 2026-10-26 advisory.
+# Keep this patch pin current when subsequent Node security releases ship.
+FROM node:22.23.4-alpine
+# Node uses its bundled CA store by default (updated by the runtime pin).
+# Refresh Alpine's separate store for OpenSSL and other system clients too.
+RUN apk add --no-cache --upgrade ca-certificates \
+    && update-ca-certificates
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 
