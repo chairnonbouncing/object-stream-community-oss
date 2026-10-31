@@ -1,0 +1,17 @@
+# Keep host dependencies, generated artifacts, and local secrets out of the image.
+.git
+node_modules
+**/node_modules
+.next
+**/.next
+coverage
+.env
+.env.*
+**/.env
+**/.env.*
+.npmrc
+**/.npmrc
+*.pem
+**/*.pem
+*.key
+**/*.key

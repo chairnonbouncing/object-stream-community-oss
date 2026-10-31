@@ -1,0 +1,125 @@
+name: Docker image validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build fresh image
+        run: |
+          mkdir -p node_modules
+          touch node_modules/.docker-context-check .env private.key
+          docker build --pull --no-cache -t osc-validation .
+      - name: Inspect runtime and CA packages
+        run: |
+          docker run --rm --entrypoint sh osc-validation -c '
+            set -eu
+            node --version
+            apk info -e ca-certificates ca-certificates-bundle > /dev/null
+            apk list --installed "ca-certificates*"
+            test -s /etc/ssl/certs/ca-certificates.crt
+            test ! -e /app/.env
+            test ! -e /app/private.key
+            test ! -e /app/node_modules/.docker-context-check
+          '
+      - name: Run application tests in Alpine
+        run: docker run --rm --entrypoint npm osc-validation test
+      - name: Check Prisma and application startup with a temporary database
+        run: |
+          docker network create osc-validation-net
+          trap 'docker rm -f osc-validation-app osc-validation-db >/dev/null 2>&1 || true; docker network rm osc-validation-net >/dev/null 2>&1 || true' EXIT
+          docker run -d --name osc-validation-db --network osc-validation-net \
+            -e POSTGRES_USER=osc -e POSTGRES_PASSWORD=osc -e POSTGRES_DB=osc \
+            postgres:16-alpine >/dev/null
+          ready=0
+          for attempt in $(seq 1 45); do
+            if docker exec osc-validation-db pg_isready -U osc -d osc >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then docker logs osc-validation-db; exit 1; fi
+          docker run --rm --network osc-validation-net \
+            -e DATABASE_URL=postgresql://osc:osc@osc-validation-db:5432/osc \
+            --entrypoint node osc-validation -e '
+              const { PrismaClient } = require("@prisma/client");
+              const db = new PrismaClient();
+              db.$queryRawUnsafe("SELECT 1 AS value")
+                .then(rows => {
+                  if (rows[0].value !== 1) throw new Error("Unexpected query result");
+                  console.log("Prisma database query passed");
+                })
+                .catch(error => { console.error(error); process.exitCode = 1; })
+                .finally(() => db.$disconnect());
+            '
+          docker run -d --name osc-validation-app --network osc-validation-net \
+            -p 127.0.0.1:33001:3000 \
+            -e DATABASE_URL=postgresql://osc:osc@osc-validation-db:5432/osc \
+            -e AUTH_SECRET=temporary-validation-secret-32-bytes \
+            -e AUTH_TRUST_HOST=true -e ADMIN_PASSWORD=temporary-validation-password \
+            osc-validation >/dev/null
+          ready=0
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:33001/; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then docker logs osc-validation-app; exit 1; fi
+          echo "Application HTTP startup passed"
+      - name: Report production dependency audit
+        run: |
+          docker run --rm --entrypoint npm osc-validation audit --omit=dev --json > /tmp/osc-audit.json || true
+          node <<'NODE'
+          const fs = require("node:fs");
+          const report = JSON.parse(fs.readFileSync("/tmp/osc-audit.json", "utf8"));
+          if (!report.metadata?.vulnerabilities) throw new Error("Production audit did not return vulnerability counts");
+          console.log("Production dependency audit:", JSON.stringify(report.metadata.vulnerabilities));
+          for (const [name, item] of Object.entries(report.vulnerabilities ?? {})) {
+            console.log(JSON.stringify({
+              name, severity: item.severity, isDirect: item.isDirect,
+              range: item.range, fixAvailable: item.fixAvailable,
+              via: item.via.map(entry => typeof entry === "string"
+                ? entry : { title: entry.title, url: entry.url, range: entry.range })
+            }));
+          }
+          NODE
+      - name: Verify Node and Alpine certificate stores
+        run: |
+          cat > /tmp/verify-emudhra.mjs <<'NODE'
+          const tests = [
+            ["https://render.com/", true],
+            ["https://dv-g3b-emudhra.we-have-a-problem.com/", false],
+            ["https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", false],
+          ];
+          const rejected = new Set([
+            "CERT_REVOKED",
+            "UNABLE_TO_GET_ISSUER_CERT",
+            "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+          ]);
+          for (const [url, shouldConnect] of tests) {
+            try {
+              const response = await fetch(url, {
+                redirect: "manual",
+                signal: AbortSignal.timeout(15000),
+              });
+              await response.body?.cancel();
+              console.log(url, "CONNECTED", response.status);
+              if (!shouldConnect) process.exitCode = 1;
+            } catch (error) {
+              const code = error.cause?.code;
+              console.log(url, "FAILED", code ?? error.message);
+              if (shouldConnect || !rejected.has(code)) process.exitCode = 1;
+            }
+          }
+          NODE
+          docker run --rm -i --entrypoint node osc-validation --input-type=module < /tmp/verify-emudhra.mjs
+          docker run --rm -i --entrypoint node osc-validation --use-openssl-ca --input-type=module < /tmp/verify-emudhra.mjs

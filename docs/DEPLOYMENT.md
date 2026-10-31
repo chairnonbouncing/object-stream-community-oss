@@ -46,8 +46,11 @@ database**. Serverless (Vercel) also works with caveats noted below.
 | Build (local, DDL already committed) | `npm run build` |
 | Start | `npm start` (honors `PORT`, binds `HOSTNAME=0.0.0.0` in the Dockerfile) |
 
-Node **20.9+** is required (`package.json` `engines`); the included Dockerfile
-uses Node 22.
+`package.json` declares Node **20.9+**, matching Next.js's minimum, but some
+locked development tools require a newer release. The included Dockerfile uses
+Node **22.23.4**, which satisfies the locked tools' declared engine ranges and
+is the minimum patched Node 22 release for Render's October 2026 advisory.
+Production hosts must use a currently patched, supported Node release.
 
 ---
 
@@ -115,8 +118,118 @@ a free web service in one click.
 Free-tier notes:
 - The free web service **sleeps after idle** — first request after sleep takes
   ~30–60 s. Paid instances don't sleep.
-- Free Postgres has a 1 GB cap and expires after 90 days unless upgraded —
-  **schedule backups** (below) if you stay on free.
+- Free Postgres has a 1 GB cap and expires after 30 days unless upgraded —
+  **schedule backups** (below) if you stay on free. See
+  [Render's current free-tier limits](https://render.com/docs/free).
+- Free web services do not offer shell access or one-off jobs; see the
+  [shell-access limitations](https://render.com/docs/ssh).
+
+### Security rebuilds: October 26, 2026 Render advisory
+
+Sources: [Render eMudhra guidance](https://render.com/docs/advisory-emudhra)
+and [Node October 21 security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+
+The Dockerfile pins `node:22.23.4-alpine` so a build cannot silently use an
+older Node 22 patch. Update the pin as later security fixes ship. The same
+image supplies Node for dependency installation, the build, and production.
+Node's patched bundled CA store addresses its certificate handling; updating
+Alpine's system store alone would not patch Node. The Dockerfile also upgrades
+`ca-certificates` from the configured Alpine repositories and regenerates the
+system bundle before `npm ci`. This does not prove that the distribution's
+available package contains every required fix: verify the resulting image.
+
+Checked-in outbound application clients use `fetch`; no custom CA bundles,
+TLS verification bypasses, or PHP runtime were found in this repository.
+No advisory-specific npm dependency update was identified. This is not a
+claim that all dependencies are free of vulnerabilities. Libraries added later
+that bundle certificates or TLS implementations need their own updates.
+
+`render.yaml` describes a Docker web service and Postgres database. It does
+**not** establish that a live Render service exists or identify its running
+image. A floating base tag in an older deployment does not update a running
+container. A restart alone is not a rebuild.
+
+For an existing deployment:
+
+1. Confirm the actual service, linked repository, deployed branch/commit,
+   Dockerfile path, and Docker runtime in the Render dashboard. Check every
+   service using this image, including any separately configured workers.
+2. Merge the patched Dockerfile and rebuild from that commit. Use Render's
+   **Manual Deploy → Clear build cache & deploy** so a cached certificate
+   installation layer is not reused. For other Docker hosts, use
+   `docker build --pull --no-cache -t osc .` and replace the running container.
+   A Docker service gets Node from its image; setting Render's native-runtime
+   `NODE_VERSION` does not update this Dockerfile.
+3. Inspect the built image before deploying, and repeat in the running service:
+
+   ```sh
+   node --version
+   apk info -e ca-certificates ca-certificates-bundle
+   apk list --installed 'ca-certificates*'
+   test -s /etc/ssl/certs/ca-certificates.crt
+   ```
+
+   Require Node 22.23.4 or a later patched 22.x release for this image. Record
+   the image digest, Alpine package versions, deployed commit and deployment ID.
+   Review `NODE_OPTIONS`, `NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`,
+   `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_TLS_REJECT_UNAUTHORIZED` in
+   the service's environment. Also review `NODE_USE_ENV_PROXY` and any proxy
+   configuration: a TLS-intercepting proxy changes which certificate the
+   application sees. Overrides and separately mounted bundles can change trust;
+   update any custom bundle and keep verification enabled. Do not print proxy
+   credentials or unrelated secrets.
+
+   Render's free web services have no shell or one-off jobs, so these commands
+   cannot be run there as written. To log the runtime version on a free service
+   using this Dockerfile's default start command, temporarily set its Docker
+   Command to `/bin/sh -c 'node --version; exec npm start'` and redeploy.
+   Preserve any existing custom start command and restore the setting afterward.
+   This logs the version of the Node binary in the running instance; it does
+   not verify TLS. Certificate checks still need to run inside the live service
+   with its production client and environment, for example through controlled
+   startup diagnostics or an available paid-service shell.
+4. From the running container with the app's environment, exercise Node's
+   `fetch` (the client used by the checked-in outbound app code):
+
+   ```sh
+   node --input-type=module <<'JS'
+   const urls = [
+     "https://render.com/", // positive control: must connect successfully
+     "https://dv-g3b-emudhra.we-have-a-problem.com/",
+     "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/",
+   ];
+   for (const url of urls) {
+     try {
+       const response = await fetch(url, {
+         redirect: "manual", signal: AbortSignal.timeout(10000),
+       });
+       await response.body?.cancel();
+       console.log(url, "CONNECTED", response.status);
+       if (url !== urls[0]) process.exitCode = 1;
+     } catch (error) {
+       console.error(url, error.cause?.code, error.cause?.message ?? error.message);
+       // Review each error: DNS failures/timeouts do not prove rejection.
+       process.exitCode = 1;
+     }
+   }
+   JS
+   ```
+
+   The positive control must connect. Both compromised-certificate endpoints
+   must fail specifically with certificate verification errors. Any HTTP
+   response, including redirects or errors, means the TLS connection was
+   accepted. The snippet deliberately exits nonzero on errors so its exit
+   status alone cannot be mistaken for proof of remediation; inspect the
+   error codes/messages. DNS failures, timeouts, or unavailable test endpoints
+   leave the check inconclusive. TLS interception can make this a test of the
+   proxy rather than the origin certificate chain; identify and remediate the
+   proxy's trust configuration too. Testing with host `curl` alone does not
+   validate Node's trust store. If the app later adds a custom dispatcher or
+   TLS client, repeat the check through that actual client configuration.
+5. Confirm the new deployment is serving traffic, then smoke-test sign-in,
+   normal page loads and outbound YouTube/Vimeo metadata or playlist imports.
+   Only then record deployment remediation as complete. These instructions
+   do not assert that any live service has been inspected or redeployed.
 
 ### Railway
 
@@ -177,7 +290,7 @@ docker run -d --name osc-db --network osc \
   -e POSTGRES_PASSWORD=change-me -e POSTGRES_DB=osc \
   -v osc-pgdata:/var/lib/postgresql/data postgres:16-alpine
 
-docker build -t osc .
+docker build --pull -t osc .
 docker run -d --name osc-app --network osc -p 80:3000 \
   -e DATABASE_URL=postgresql://postgres:change-me@osc-db:5432/osc \
   -e AUTH_SECRET=$(openssl rand -base64 32) \
