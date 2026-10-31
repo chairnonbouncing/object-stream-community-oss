@@ -1,0 +1,60 @@
+name: Docker image validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build fresh image
+        run: docker build --pull --no-cache -t osc-validation .
+      - name: Inspect runtime and CA packages
+        run: |
+          docker run --rm --entrypoint sh osc-validation -c '
+            set -eu
+            node --version
+            apk info -v ca-certificates ca-certificates-bundle
+            test -s /etc/ssl/certs/ca-certificates.crt
+          '
+      - name: Run application tests in Alpine
+        run: docker run --rm --entrypoint npm osc-validation test
+      - name: Verify Node and Alpine certificate stores
+        run: |
+          cat > /tmp/verify-emudhra.mjs <<'NODE'
+          const tests = [
+            ["https://render.com/", true],
+            ["https://dv-g3b-emudhra.we-have-a-problem.com/", false],
+            ["https://dv-g3b-aaa-emudhra.we-have-a-problem.com/", false],
+          ];
+          const rejected = new Set([
+            "CERT_REVOKED",
+            "UNABLE_TO_GET_ISSUER_CERT",
+            "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+            "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+          ]);
+          for (const [url, shouldConnect] of tests) {
+            try {
+              const response = await fetch(url, {
+                redirect: "manual",
+                signal: AbortSignal.timeout(15000),
+              });
+              await response.body?.cancel();
+              console.log(url, "CONNECTED", response.status);
+              if (!shouldConnect) process.exitCode = 1;
+            } catch (error) {
+              const code = error.cause?.code;
+              console.log(url, "FAILED", code ?? error.message);
+              if (shouldConnect || !rejected.has(code)) process.exitCode = 1;
+            }
+          }
+          NODE
+          docker run --rm -i --entrypoint node osc-validation --input-type=module < /tmp/verify-emudhra.mjs
+          docker run --rm -i --entrypoint node osc-validation --use-openssl-ca --input-type=module < /tmp/verify-emudhra.mjs
