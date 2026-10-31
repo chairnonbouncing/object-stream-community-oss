@@ -164,7 +164,8 @@ For an existing deployment:
 
    ```sh
    node --version
-   apk info -v ca-certificates ca-certificates-bundle
+   apk info -e ca-certificates ca-certificates-bundle
+   apk list --installed 'ca-certificates*'
    test -s /etc/ssl/certs/ca-certificates.crt
    ```
 
